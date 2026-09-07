@@ -1,0 +1,67 @@
+{
+  "name": "@gtrabanco/pi-web-github-pr-status",
+  "version": "0.1.0",
+  "nextRelease": "patch",
+  "description": "PI WEB plugin that surfaces GitHub pull request status (PR number, link, CI ball, worktree state) and one-click guarded merge/close without leaving the workspace.",
+  "license": "MIT",
+  "author": "gtrabanco",
+  "type": "module",
+  "keywords": [
+    "pi",
+    "pi-web",
+    "pi-web-plugin",
+    "pi-coding-agent",
+    "plugin",
+    "github",
+    "pull-request",
+    "pr",
+    "ci",
+    "merge"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gtrabanco/pi-web-github-pr-status.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gtrabanco/pi-web-github-pr-status/issues"
+  },
+  "homepage": "https://github.com/gtrabanco/pi-web-github-pr-status#readme",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "RELEASE-POLICY.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "piWeb": {
+    "plugins": [
+      {
+        "id": "github-pr-status",
+        "browserRoot": "dist",
+        "module": "dist/index.js"
+      }
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "bun build src/index.ts --outfile dist/index.js --target browser",
+    "check": "bun run typecheck && bun run test && bun run build && bun run scripts/validate-package.ts",
+    "release:status": "bun run scripts/release.ts --status",
+    "release:patch": "bun run scripts/release.ts --set-next patch",
+    "release:minor": "bun run scripts/release.ts --set-next minor",
+    "release:major": "bun run scripts/release.ts --set-next major",
+    "publish": "bun run scripts/release.ts --publish"
+  },
+  "devDependencies": {
+    "@jmfederico/pi-web": "^1.202609.0",
+    "@types/bun": "latest",
+    "typescript": "7"
+  },
+  "peerDependencies": {
+    "typescript": "7"
+  }
+}
