@@ -131,10 +131,9 @@ async function publish(): Promise<void> {
   if (kind !== undefined) {
     await savePackageJson(pkg, releaseVersion, "patch");
     await prependChangelog(releaseVersion, kind);
+    git(["add", "package.json", "CHANGELOG.md"]);
+    git(["commit", "-m", `chore(release): v${releaseVersion}`]);
   }
-
-  git(["add", "package.json", "CHANGELOG.md"]);
-  git(["commit", "-m", `chore(release): v${releaseVersion}`]);
   git(["tag", `v${releaseVersion}`]);
 
   console.log("▶ bun publish");
