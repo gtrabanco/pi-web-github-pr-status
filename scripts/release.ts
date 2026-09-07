@@ -134,7 +134,10 @@ async function publish(): Promise<void> {
     git(["add", "package.json", "CHANGELOG.md"]);
     git(["commit", "-m", `chore(release): v${releaseVersion}`]);
   }
-  git(["tag", "-f", `v${releaseVersion}`]);
+  const tagResult = git(["tag", `v${releaseVersion}`], { allowFailure: true });
+  if (!tagResult.ok) {
+    console.warn(`⚠ tag v${releaseVersion} already exists, skipping tag creation.`);
+  }
 
   console.log("▶ bun publish");
   const publish = spawnSync("bun", ["publish"], { stdio: "inherit" });
