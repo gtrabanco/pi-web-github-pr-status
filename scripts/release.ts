@@ -29,11 +29,11 @@ async function readPackageJson(): Promise<PackageJson> {
   return JSON.parse(await readFile(PACKAGE_JSON_PATH, "utf8")) as PackageJson;
 }
 
-function git(args: string, options: { allowFailure?: boolean } = {}): { ok: boolean; output: string } {
-  const result = spawnSync("git", args.split(" ").filter((part) => part !== ""), { encoding: "utf8" });
+function git(args: string[], options: { allowFailure?: boolean } = {}): { ok: boolean; output: string } {
+  const result = spawnSync("git", args, { encoding: "utf8" });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
   if (result.status !== 0 && options.allowFailure !== true) {
-    throw new Error(`git ${args} failed: ${output}`);
+    throw new Error(`git ${args.join(" ")} failed: ${output}`);
   }
   return { ok: result.status === 0, output };
 }
@@ -54,12 +54,12 @@ function runCheck(): void {
 }
 
 function assertReleasable(): void {
-  git("rev-parse --git-dir");
-  const branch = git("rev-parse --abbrev-ref HEAD").output;
+  git(["rev-parse", "--git-dir"]);
+  const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).output;
   if (branch !== MAIN_BRANCH) {
     throw new Error(`Releases run from ${MAIN_BRANCH} only (current branch: ${branch}).`);
   }
-  const status = git("status --porcelain").output;
+  const status = git(["status", "--porcelain"]).output;
   if (status !== "") {
     throw new Error("Worktree is not clean. Commit or stash your changes before releasing.");
   }
@@ -133,9 +133,9 @@ async function publish(): Promise<void> {
     await prependChangelog(releaseVersion, kind);
   }
 
-  git(`add package.json CHANGELOG.md`);
-  git(`commit -m "chore(release): v${releaseVersion}"`);
-  git(`tag v${releaseVersion}`);
+  git(["add", "package.json", "CHANGELOG.md"]);
+  git(["commit", "-m", `chore(release): v${releaseVersion}`]);
+  git(["tag", `v${releaseVersion}`]);
 
   console.log("▶ bun publish");
   const publish = spawnSync("bun", ["publish"], { stdio: "inherit" });
