@@ -134,7 +134,7 @@ async function publish(): Promise<void> {
     git(["add", "package.json", "CHANGELOG.md"]);
     git(["commit", "-m", `chore(release): v${releaseVersion}`]);
   }
-  git(["tag", `v${releaseVersion}`]);
+  git(["tag", "-f", `v${releaseVersion}`]);
 
   console.log("▶ bun publish");
   const publish = spawnSync("bun", ["publish"], { stdio: "inherit" });
