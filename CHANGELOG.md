@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here. The project follows [strict semantic versioning](./RELEASE-POLICY.md); the kind of the next release is registered in `package.json` (`nextRelease`) before `bun run publish` is executed.
 
+## 0.1.1 — 2026-09-08 (Patch release)
+
+- See commit history for details.
+
 ## 0.1.0 — initial development version
 
 - GitHub PR workspace label: PR number link, CI ball (green/orange/red/none), dirty-worktree marker, push/pull arrows.
