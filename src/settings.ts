@@ -11,6 +11,10 @@ export interface MergeSettings {
   requireCI: boolean;
   /** Pass --delete-branch to gh pr merge. */
   deleteBranch: boolean;
+  /** After merge, checkout the target branch and pull. */
+  checkoutTarget: boolean;
+  /** After merge, delete the merged branch locally (only when not on the branch). */
+  deleteBranchAfterMerge: boolean;
 }
 
 export interface Settings {
@@ -18,18 +22,23 @@ export interface Settings {
   showCI: boolean;
   /** Background probe interval in seconds; 0 disables automatic probing. */
   refreshSeconds: number;
+  /** Adapt polling frequency based on CI state (faster when CI is running). */
+  adaptiveRefresh: boolean;
   merge: MergeSettings;
 }
 
 export const DEFAULT_SETTINGS: Settings = Object.freeze({
   showCI: true,
   refreshSeconds: 90,
+  adaptiveRefresh: true,
   merge: Object.freeze({
     enabled: true,
     method: "merge",
     requireCleanWorktree: true,
     requireCI: true,
     deleteBranch: false,
+    checkoutTarget: true,
+    deleteBranchAfterMerge: true,
   }),
 });
 
@@ -74,6 +83,8 @@ function mergeBooleans(
     requireCleanWorktree: pick("requireCleanWorktree"),
     requireCI: pick("requireCI"),
     deleteBranch: pick("deleteBranch"),
+    checkoutTarget: pick("checkoutTarget"),
+    deleteBranchAfterMerge: pick("deleteBranchAfterMerge"),
     method: normalizeMethod(raw.method, defaults.method, warnings),
   };
 }
@@ -107,10 +118,14 @@ export function normalizeSettings(raw: unknown): { settings: Settings; warnings:
   const showCI = coerceBoolean(source.showCI);
   if (showCI === undefined && source.showCI !== undefined) warnings.push("showCI: ignored invalid value");
 
+  const adaptiveRefresh = coerceBoolean(source.adaptiveRefresh);
+  if (adaptiveRefresh === undefined && source.adaptiveRefresh !== undefined) warnings.push("adaptiveRefresh: ignored invalid value");
+
   const mergeSource = asObject(source.merge);
   const settings: Settings = {
     showCI: showCI ?? DEFAULT_SETTINGS.showCI,
     refreshSeconds: normalizeRefreshSeconds(source.refreshSeconds, DEFAULT_SETTINGS.refreshSeconds, warnings),
+    adaptiveRefresh: adaptiveRefresh ?? DEFAULT_SETTINGS.adaptiveRefresh,
     merge: mergeBooleans(mergeSource, DEFAULT_SETTINGS.merge, warnings, "merge."),
   };
   return { settings, warnings };

@@ -20,12 +20,14 @@ describe("normalizeSettings", () => {
     const { settings, warnings } = normalizeSettings({
       showCI: false,
       refreshSeconds: 30,
-      merge: { enabled: false, method: "squash", requireCleanWorktree: false, requireCI: false, deleteBranch: true },
+      adaptiveRefresh: false,
+      merge: { enabled: false, method: "squash", requireCleanWorktree: false, requireCI: false, deleteBranch: true, checkoutTarget: false, deleteBranchAfterMerge: true },
     });
     expect(settings).toEqual({
       showCI: false,
       refreshSeconds: 30,
-      merge: { enabled: false, method: "squash", requireCleanWorktree: false, requireCI: false, deleteBranch: true },
+      adaptiveRefresh: false,
+      merge: { enabled: false, method: "squash", requireCleanWorktree: false, requireCI: false, deleteBranch: true, checkoutTarget: false, deleteBranchAfterMerge: true },
     });
     expect(warnings).toEqual([]);
   });
@@ -57,6 +59,19 @@ describe("normalizeSettings", () => {
     expect(normalizeSettings({ refreshSeconds: 45.7 }).settings.refreshSeconds).toBe(45);
   });
 
+  it("defaults adaptiveRefresh to true and coerces boolean-ish values", () => {
+    expect(normalizeSettings({}).settings.adaptiveRefresh).toBe(true);
+    expect(normalizeSettings({ adaptiveRefresh: false }).settings.adaptiveRefresh).toBe(false);
+    expect(normalizeSettings({ adaptiveRefresh: 1 }).settings.adaptiveRefresh).toBe(true);
+    expect(normalizeSettings({ adaptiveRefresh: "nope" }).settings.adaptiveRefresh).toBe(true);
+  });
+
+  it("defaults merge.checkoutTarget and merge.deleteBranchAfterMerge", () => {
+    const { settings } = normalizeSettings({});
+    expect(settings.merge.checkoutTarget).toBe(true);
+    expect(settings.merge.deleteBranchAfterMerge).toBe(true);
+  });
+
   it("never throws on hostile input", () => {
     const hostile = { showCI: { a: [] }, merge: { method: 5, requireCI: [] }, refreshSeconds: { x: 1 } };
     expect(() => normalizeSettings(hostile)).not.toThrow();
@@ -68,7 +83,8 @@ describe("serializeSettings", () => {
     const custom: Settings = {
       showCI: false,
       refreshSeconds: 60,
-      merge: { enabled: true, method: "squash", requireCleanWorktree: false, requireCI: true, deleteBranch: true },
+      adaptiveRefresh: false,
+      merge: { enabled: true, method: "squash", requireCleanWorktree: false, requireCI: true, deleteBranch: true, checkoutTarget: false, deleteBranchAfterMerge: true },
     };
     const { settings, warnings } = normalizeSettings(JSON.parse(serializeSettings(custom)));
     expect(settings).toEqual(custom);

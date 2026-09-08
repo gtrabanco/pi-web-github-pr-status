@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { DEFAULT_SETTINGS, type Settings } from "./settings.ts";
-import { evaluateClose, evaluateMerge, buildMergeCommand, buildCloseCommand, explainCiState } from "./guards.ts";
+import { evaluateClose, evaluateMerge, buildMergeCommand, buildCloseCommand, buildCheckoutTargetCommand, buildDeleteLocalBranchCommand, explainCiState } from "./guards.ts";
 import type { PrStatus } from "./types.ts";
 
 function baseStatus(overrides: Partial<PrStatus> = {}): PrStatus {
@@ -34,7 +34,8 @@ function openPr(overrides: Record<string, unknown> = {}): NonNullable<PrStatus["
 const safeSettings: Settings = {
   showCI: true,
   refreshSeconds: 90,
-  merge: { enabled: true, method: "merge", requireCleanWorktree: true, requireCI: true, deleteBranch: false },
+  adaptiveRefresh: true,
+  merge: { enabled: true, method: "merge", requireCleanWorktree: true, requireCI: true, deleteBranch: false, checkoutTarget: true, deleteBranchAfterMerge: false },
 };
 
 describe("evaluateMerge", () => {
@@ -167,6 +168,34 @@ describe("command builders", () => {
 
   it("builds close commands", () => {
     expect(buildCloseCommand(42)).toBe("gh pr close 42 < /dev/null");
+  });
+
+  it("builds checkout target commands", () => {
+    expect(buildCheckoutTargetCommand("dev")).toBe("git checkout dev && git pull origin dev");
+    expect(buildCheckoutTargetCommand("feature/foo")).toBe("git checkout feature/foo && git pull origin feature/foo");
+  });
+
+  it("sanitizes branch names in checkout target command", () => {
+    // Only allows safe characters
+    expect(buildCheckoutTargetCommand("main; rm -rf /")).toBe("git checkout mainrm-rf/ && git pull origin mainrm-rf/");
+  });
+
+  it("rejects empty branch names for checkout target", () => {
+    expect(() => buildCheckoutTargetCommand("")).toThrow();
+    expect(() => buildCheckoutTargetCommand("  ")).toThrow();
+  });
+
+  it("builds delete local branch commands", () => {
+    expect(buildDeleteLocalBranchCommand("feat/x")).toBe("git branch -d feat/x");
+  });
+
+  it("sanitizes branch names in delete command", () => {
+    expect(buildDeleteLocalBranchCommand("main; evil")).toBe("git branch -d mainevil");
+  });
+
+  it("rejects empty branch names for delete", () => {
+    expect(() => buildDeleteLocalBranchCommand("")).toThrow();
+    expect(() => buildDeleteLocalBranchCommand("  ")).toThrow();
   });
 });
 

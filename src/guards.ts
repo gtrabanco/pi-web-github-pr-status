@@ -115,6 +115,24 @@ export function buildCloseCommand(prNumber: number): string {
   return `gh pr close ${String(prNumber)} < /dev/null`;
 }
 
+/** Checkout the target branch and pull latest changes. */
+export function buildCheckoutTargetCommand(targetBranch: string): string {
+  if (typeof targetBranch !== "string" || targetBranch.trim() === "") {
+    throw new Error("Invalid target branch name");
+  }
+  const safe = targetBranch.replace(/[^a-zA-Z0-9_./-]/g, "");
+  return `git checkout ${safe} && git pull origin ${safe}`;
+}
+
+/** Delete a local branch (force delete not used — only merged branches). */
+export function buildDeleteLocalBranchCommand(branchName: string): string {
+  if (typeof branchName !== "string" || branchName.trim() === "") {
+    throw new Error("Invalid branch name");
+  }
+  const safe = branchName.replace(/[^a-zA-Z0-9_./-]/g, "");
+  return `git branch -d ${safe}`;
+}
+
 /** Human description of a CI summary, used for tooltips and messages. */
 export function explainCiState(ci: CiSummary): string {
   switch (ci.state) {

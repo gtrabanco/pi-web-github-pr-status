@@ -5,7 +5,7 @@ import type {
   WorkspacePanelContribution,
 } from "@jmfederico/pi-web/plugin-api";
 import { runWorkspaceCommand, statusCache } from "./cache.ts";
-import { buildCloseCommand, buildMergeCommand, evaluateClose, evaluateMerge, explainCiState } from "./guards.ts";
+import { buildCheckoutTargetCommand, buildCloseCommand, buildDeleteLocalBranchCommand, buildMergeCommand, evaluateClose, evaluateMerge, explainCiState } from "./guards.ts";
 import { DEFAULT_SETTINGS, MERGE_METHODS, serializeSettings, type Settings } from "./settings.ts";
 import { PLUGIN_ID, SETTINGS_PATH } from "./types.ts";
 import type { PrStatus } from "./types.ts";
@@ -20,11 +20,16 @@ interface PrWorkspaceUiState {
   context: WorkspacePanelContext;
   retained: boolean;
   confirm: { kind: "merge" | "close"; reasons: string[] } | null;
-  busy: null | "probe" | "merge" | "close" | "settings";
+  busy: null | "probe" | "merge" | "close" | "settings" | "post-merge";
   outcome: { ok: boolean; message: string; terminalId?: string } | null;
   settingsOpen: boolean;
   draft: Settings | null;
   lastInvalidate: number;
+  /** Post-merge state: set after a successful merge to offer follow-up actions. */
+  postMerge: {
+    targetBranch: string;
+    mergedBranch: string;
+  } | null;
 }
 
 export class PrUiController {
@@ -46,6 +51,7 @@ export class PrUiController {
       settingsOpen: false,
       draft: null,
       lastInvalidate: 0,
+      postMerge: null,
     };
     this.states.set(key, created);
     return created;
@@ -77,12 +83,22 @@ export class PrUiController {
     const settings = statusCache.entrySettings(context).settings;
     if (settings.refreshSeconds <= 0) return;
     const entry = statusCache.get(context);
-    const staleMs = settings.refreshSeconds * 1000;
+    const staleMs = this.effectiveRefreshMs(settings, entry?.status);
     if (entry === undefined) {
       void this.probe(context);
       return;
     }
     if (Date.now() - Math.max(entry.probedAt, entry.loadedAt) >= staleMs) void this.probe(context);
+  }
+
+  /** Compute the effective refresh interval, adapting when CI is running. */
+  private effectiveRefreshMs(settings: Settings, status: PrStatus | undefined): number {
+    const baseMs = settings.refreshSeconds * 1000;
+    if (!settings.adaptiveRefresh || status === undefined) return baseMs;
+    const ci = status.ci;
+    if (ci.state === "running") return Math.min(baseMs, 20_000);
+    if (ci.state === "failed") return Math.min(baseMs, 45_000);
+    return baseMs;
   }
 
   invalidate(context: WorkspacePanelContext): void {
@@ -169,6 +185,7 @@ export class PrUiController {
     state.confirm = null;
     state.busy = "merge";
     state.outcome = null;
+    state.postMerge = null;
     this.requestRender(state);
     try {
       const run = await runGuardedCommand(context, {
@@ -178,6 +195,12 @@ export class PrUiController {
       });
       if (run.exitCode === 0) {
         state.outcome = { ok: true, message: `PR #${String(pr.number)} merged (${settings.merge.method}).` };
+        // Offer post-merge actions when configured
+        const targetBranch = pr.baseRefName;
+        const mergedBranch = pr.headRefName ?? status?.branch;
+        if (settings.merge.checkoutTarget && targetBranch !== undefined && mergedBranch !== undefined) {
+          state.postMerge = { targetBranch, mergedBranch };
+        }
       } else {
         state.outcome = { ok: false, message: `Merge failed (exit ${String(run.exitCode ?? "?")}). Check the terminal output.`, terminalId: run.terminalId };
       }
@@ -188,6 +211,71 @@ export class PrUiController {
       void statusCache.probe(context, { force: true }).catch(() => undefined);
       this.requestRender(state);
     }
+  }
+
+  /** Post-merge: checkout target branch and pull. */
+  async postMergeCheckout(context: WorkspacePanelContext): Promise<void> {
+    const state = this.stateFor(context);
+    const pm = state.postMerge;
+    if (pm === null) return;
+    state.busy = "post-merge";
+    state.outcome = null;
+    this.requestRender(state);
+    try {
+      const run = await runGuardedCommand(context, {
+        title: `Checkout ${pm.targetBranch}`,
+        command: buildCheckoutTargetCommand(pm.targetBranch),
+        op: "post-merge",
+      });
+      if (run.exitCode === 0) {
+        state.outcome = { ok: true, message: `Switched to ${pm.targetBranch} and pulled latest.` };
+        state.postMerge = null;
+      } else {
+        state.outcome = { ok: false, message: `Checkout failed (exit ${String(run.exitCode ?? "?")}).`, terminalId: run.terminalId };
+      }
+    } catch (error) {
+      state.outcome = { ok: false, message: errorMessage(error) };
+    } finally {
+      state.busy = null;
+      void statusCache.probe(context, { force: true }).catch(() => undefined);
+      this.requestRender(state);
+    }
+  }
+
+  /** Post-merge: delete the merged branch locally. */
+  async postMergeDeleteBranch(context: WorkspacePanelContext): Promise<void> {
+    const state = this.stateFor(context);
+    const pm = state.postMerge;
+    if (pm === null) return;
+    state.busy = "post-merge";
+    state.outcome = null;
+    this.requestRender(state);
+    try {
+      const run = await runGuardedCommand(context, {
+        title: `Delete branch ${pm.mergedBranch}`,
+        command: buildDeleteLocalBranchCommand(pm.mergedBranch),
+        op: "post-merge",
+      });
+      if (run.exitCode === 0) {
+        state.outcome = { ok: true, message: `Branch ${pm.mergedBranch} deleted.` };
+        state.postMerge = null;
+      } else {
+        state.outcome = { ok: false, message: `Delete failed (exit ${String(run.exitCode ?? "?")}).`, terminalId: run.terminalId };
+      }
+    } catch (error) {
+      state.outcome = { ok: false, message: errorMessage(error) };
+    } finally {
+      state.busy = null;
+      void statusCache.probe(context, { force: true }).catch(() => undefined);
+      this.requestRender(state);
+    }
+  }
+
+  /** Dismiss the post-merge panel. */
+  dismissPostMerge(context: WorkspacePanelContext): void {
+    const state = this.stateFor(context);
+    state.postMerge = null;
+    this.requestRender(state);
   }
 
   private async runClose(context: WorkspacePanelContext, status: PrStatus | undefined): Promise<void> {
@@ -399,7 +487,8 @@ function renderBody(
     ${settings.showCI ? renderCiSection(html, status) : html`<p class="ghpr-muted">CI display is disabled in settings.</p>`}
     ${renderWorktreeSection(html, status)}
     ${renderOutcome(html, state)}
-    ${pr !== undefined && pr.state === "OPEN"
+    ${state.postMerge !== null ? renderPostMerge(html, controller, context, state, busy) : null}
+    ${pr !== undefined && pr.state === "OPEN" && state.postMerge === null
       ? renderActions(html, controller, context, state, mergeEvaluation, closeEvaluation, busy)
       : null}
     ${renderSettings(html, controller, context, state, settings)}
@@ -516,6 +605,48 @@ function renderOutcome(html: HtmlTemplateTag, state: PrWorkspaceUiState) {
   `;
 }
 
+function renderPostMerge(
+  html: HtmlTemplateTag,
+  controller: PrUiController,
+  context: WorkspacePanelContext,
+  state: PrWorkspaceUiState,
+  busy: boolean,
+) {
+  const pm = state.postMerge;
+  if (pm === null) return null;
+  return html`
+    <section class="ghpr-actions ghpr-post-merge">
+      <p class="ghpr-post-merge-title">Merge complete! Next steps:</p>
+      <div class="ghpr-buttons">
+        <button
+          type="button"
+          class="ghpr-primary"
+          title="Checkout "${pm.targetBranch}" and pull latest changes"
+          ?disabled=${busy}
+          @click=${() => { void controller.postMergeCheckout(context); }}
+        >
+          ${state.busy === "post-merge" ? "Working…" : `Checkout ${pm.targetBranch} + pull`}
+        </button>
+        <button
+          type="button"
+          title="Delete the merged branch "${pm.mergedBranch}" locally"
+          ?disabled=${busy}
+          @click=${() => { void controller.postMergeDeleteBranch(context); }}
+        >
+          ${state.busy === "post-merge" ? "Working…" : `Delete branch ${pm.mergedBranch}`}
+        </button>
+        <button
+          type="button"
+          ?disabled=${busy}
+          @click=${() => { controller.dismissPostMerge(context); }}
+        >
+          Dismiss
+        </button>
+      </div>
+    </section>
+  `;
+}
+
 function renderActions(
   html: HtmlTemplateTag,
   controller: PrUiController,
@@ -599,8 +730,11 @@ function renderSettings(
       >
       <label
         ><input type="checkbox" ?checked=${draft.merge.deleteBranch} @change=${(event: Event) => { updateCheckbox(context, controller, event, (d, value) => { d.merge.deleteBranch = value; }); }} /> Delete
-        branch after merge</label
+        branch after merge (remote)</label
       >
+      <label><input type="checkbox" ?checked=${draft.merge.checkoutTarget} @change=${(event: Event) => { updateCheckbox(context, controller, event, (d, value) => { d.merge.checkoutTarget = value; }); }} /> Offer checkout to target branch after merge</label>
+      <label><input type="checkbox" ?checked=${draft.merge.deleteBranchAfterMerge} @change=${(event: Event) => { updateCheckbox(context, controller, event, (d, value) => { d.merge.deleteBranchAfterMerge = value; }); }} /> Offer delete merged branch after merge</label>
+      <label><input type="checkbox" ?checked=${draft.adaptiveRefresh} @change=${(event: Event) => { updateCheckbox(context, controller, event, (d, value) => { d.adaptiveRefresh = value; }); }} /> Adaptive refresh (faster when CI is running)</label>
       <label>
         Merge method
         <select
