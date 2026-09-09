@@ -5,6 +5,7 @@ import {
   PROBE_SCRIPT_PATH,
   parseProbeResult,
   readAllProbeFiles,
+  readProbeFile,
   type ProbeFiles,
 } from "./probe.ts";
 import { PLUGIN_ID, SETTINGS_PATH, type PrStatus } from "./types.ts";
@@ -19,6 +20,10 @@ interface CacheEntry {
   loadedAt: number;
   /** Browser-clock milliseconds of the last probe command completion. */
   probedAt: number;
+  /** Browser-clock milliseconds of the last probe command start. */
+  probeStartedAt: number;
+  /** Consecutive probe command failures — drives the automatic backoff. */
+  probeFailures: number;
   reading?: Promise<void>;
   probing?: Promise<void>;
   host?: WorkspaceContext["host"];
@@ -117,7 +122,7 @@ export class StatusCache {
       // Only the selected workspace self-populates; other list entries stay
       // cold so labels never trigger bursts of reads for unseen workspaces.
       if (context.state?.selectedWorkspace?.id !== context.workspace.id) {
-        return { settingsWarnings: [], loadedAt: 0, probedAt: 0 };
+        return { settingsWarnings: [], loadedAt: 0, probedAt: 0, probeStartedAt: 0, probeFailures: 0 };
       }
       entry = this.evictAndCreate(key);
     }
@@ -139,23 +144,48 @@ export class StatusCache {
   /**
    * Run the probe script through a workspace terminal and refresh files.
    * Panel-only: label contexts have no terminal helper.
+   *
+   * Every probe spawns a terminal that pi-web keeps forever (no close API
+   * yet — jmfederico/pi-web#225), so callers keep automatic probes bounded;
+   * consecutive failures are counted here so the backoff can stretch the
+   * retry interval instead of piling up hung ptys.
    */
-  async probe(context: WorkspaceContext & { terminal?: TerminalLike }, options: { force?: boolean } = {}): Promise<void> {
+  async probe(context: WorkspaceContext & { terminal?: TerminalLike }): Promise<void> {
     const key = contextKey(context);
     const entry = this.entries.get(key) ?? this.evictAndCreate(key);
     entry.host = context.host;
     if (entry.probing !== undefined) return await entry.probing;
+    entry.probeStartedAt = nowMs();
     entry.probing = (async () => {
+      let commandError: unknown;
       try {
-        await context.files.writeFile(PROBE_SCRIPT_PATH, PROBE_SCRIPT, { overwrite: true });
+        await this.ensureProbeScript(context);
         await runWorkspaceCommand(context, { title: "GitHub PR status", command: PROBE_COMMAND, op: "probe" });
+      } catch (error) {
+        commandError = error;
       } finally {
         entry.probedAt = nowMs();
         entry.probing = undefined;
       }
+      if (commandError !== undefined) {
+        entry.probeFailures += 1;
+        throw commandError;
+      }
+      entry.probeFailures = 0;
       await this.startRead(context, entry);
     })();
     return await entry.probing;
+  }
+
+  /**
+   * Write the probe script only when it is missing or different: a write
+   * through the files API broadcasts a file mutation and auto-refreshes
+   * pi-web's file explorer, which is pointless churn for a constant script.
+   */
+  private async ensureProbeScript(context: WorkspaceContext): Promise<void> {
+    const existing = await readProbeFile((path) => context.files.readFile(path), PROBE_SCRIPT_PATH);
+    if (existing === PROBE_SCRIPT) return;
+    await context.files.writeFile(PROBE_SCRIPT_PATH, PROBE_SCRIPT, { overwrite: true });
   }
 
   private startRead(context: WorkspaceContext, entry: CacheEntry): Promise<void> {
@@ -192,7 +222,7 @@ export class StatusCache {
       const oldest = [...this.entries.entries()].sort((left, right) => left[1].loadedAt - right[1].loadedAt)[0];
       if (oldest !== undefined) this.entries.delete(oldest[0]);
     }
-    const entry: CacheEntry = { settingsWarnings: [], loadedAt: 0, probedAt: 0 };
+    const entry: CacheEntry = { settingsWarnings: [], loadedAt: 0, probedAt: 0, probeStartedAt: 0, probeFailures: 0 };
     this.entries.set(key, entry);
     return entry;
   }

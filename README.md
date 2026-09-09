@@ -74,6 +74,7 @@ Settings are stored **per workspace** in `.pi-web/github-pr.json` and can be edi
 {
   "showCI": true,
   "refreshSeconds": 90,
+  "adaptiveRefresh": true,
   "merge": {
     "enabled": true,
     "method": "merge",
@@ -87,7 +88,8 @@ Settings are stored **per workspace** in `.pi-web/github-pr.json` and can be edi
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `showCI` | `true` | Show the CI ball in labels and the CI section in the panel. |
-| `refreshSeconds` | `90` | Automatic probe interval while the browser tab is visible (only for the selected workspace). `0` = manual refresh only. Max `3600`. |
+| `refreshSeconds` | `90` | Automatic probe interval while the browser tab is visible (only for the selected workspace). `0` = manual refresh only. Max `3600`. Automatic probes never run more often than every 30 s regardless of this value — see [Performance & reliability](#performance--reliability). |
+| `adaptiveRefresh` | `true` | Poll faster while CI needs watching: at most every 30 s while CI is running, every 60 s while CI is failing. |
 | `merge.enabled` | `true` | Master switch for one-click merge from the panel. |
 | `merge.method` | `"merge"` | `merge`, `squash` or `rebase` (passed to `gh pr merge`). |
 | `merge.requireCleanWorktree` | `true` | Block merge when the worktree has uncommitted/untracked changes. |
@@ -101,6 +103,17 @@ Missing or invalid values fall back to defaults with a warning in the panel. Tip
 The plugin is **browser-only**. To get machine facts it writes a small POSIX `probe.sh` into `.pi-web/github-pr/`, runs it through the workspace terminal helper, and reads back per-fact files (`branch.txt`, `staged.txt`, `pr.json`, …) written by the script. PR/CI data comes from `gh pr view --json …` using the machine's existing gh auth; worktree facts come from `git`. Nothing leaves the machine except GitHub API calls made by `gh` itself.
 
 Refresh happens when you open the workspace panel, on the configured interval (visible tab only), on palette refresh, and after merge/close actions. Labels for non-selected workspaces show the last data read from disk.
+
+## Performance & reliability
+
+The plugin is deliberately frugal with the one resource it cannot recycle: **workspace terminals**. In PI WEB, every `terminal.runCommand()` creates a terminal that is currently kept forever — server-side records and the Terminal panel's list grow without garbage collection (closing them from a plugin needs [jmfederico/pi-web#225](https://github.com/jmfederico/pi-web/issues/225)). The probe is the only command the plugin runs periodically, so its cadence is bounded:
+
+- **Visible-tab only.** Automatic probes run only while the Pull Request panel is the active tool and the browser tab is visible; hidden tabs probe nothing.
+- **30 s automatic floor.** Even with `refreshSeconds` set lower, automatic probes (interval tick, surface invalidation) are spaced at least 30 s apart. The Refresh button always re-probes immediately.
+- **Adaptive, not aggressive.** With CI running the interval drops to at most 30 s (60 s while failing) — never the 20 s of older versions, which could leave ~180 terminal records per hour of CI watching.
+- **Exponential backoff.** When consecutive probes fail (hung `gh`, network outage, machine asleep) the automatic interval doubles per failure up to 15 minutes, so a broken machine cannot pile up stuck ptys. The panel keeps showing the last error until a probe succeeds; manual Refresh always retries.
+- **Cheap invalidations.** Invalidation bursts within the floor re-read the probe's scratch files instead of spawning new terminals, and the probe script is written only when missing or changed (no file-explorer refresh churn every cycle).
+- **Bounded browser memory.** Per-workspace state is capped (32 cache entries) and released when a panel unmounts or the host swaps the workspace under the panel.
 
 ## Development
 

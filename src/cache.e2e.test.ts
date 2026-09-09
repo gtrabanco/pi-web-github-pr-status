@@ -88,7 +88,7 @@ describe.skipIf(!shAvailable || !gitAvailable)("status cache e2e", () => {
 
   it("probe -> files -> parsed status (unpushed commit detected)", async () => {
     const context = makeContext(true);
-    await statusCache.probe(context as never, { force: true });
+    await statusCache.probe(context as never);
     const status: PrStatus | undefined = statusCache.entryStatus(context as never);
     expect(status).toBeDefined();
     expect(status?.git).toBe(true);

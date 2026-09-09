@@ -12,19 +12,51 @@ import type { PrStatus } from "./types.ts";
 
 export const PANEL_LOCAL_ID = "workspace.pr";
 const ACTIVITY_ELEMENT_TAG = "pi-web-github-pr-activity";
-/** Debounce for invalidate-triggered probes so palette spam stays cheap. */
-const INVALIDATE_MIN_INTERVAL_MS = 3_000;
 const MERGE_CLOSE_TIMEOUT_MS = 60_000;
+
+/** Automatic probes never run more often than this, whatever the settings say. */
+export const MIN_AUTOMATIC_PROBE_MS = 30_000;
+/** Lower bound for the adaptive interval while CI is running. */
+export const ADAPTIVE_RUNNING_FLOOR_MS = 30_000;
+/** Lower bound for the adaptive interval while CI is failing. */
+export const ADAPTIVE_FAILED_FLOOR_MS = 60_000;
+/** Upper bound for the failure backoff multiplier. */
+export const MAX_PROBE_BACKOFF_MS = 15 * 60_000;
+const MAX_PROBE_BACKOFF_EXPONENT = 5;
+/** Activity-element timer cadence; probes fire when their interval elapses. */
+const TICK_INTERVAL_MS = 5_000;
+
+/**
+ * Interval between automatic probes for a workspace. Every probe spawns a
+ * workspace terminal that pi-web currently keeps forever (no close API —
+ * jmfederico/pi-web#225), so this must stay conservative: the configured
+ * interval, optionally lowered by the adaptive CI floors, then stretched
+ * exponentially while consecutive probes keep failing (hung `gh`, network
+ * outage) so a broken machine cannot fork-bomb itself with stuck ptys.
+ */
+export function effectiveProbeIntervalMs(settings: Settings, status: PrStatus | undefined, probeFailures: number): number {
+  let ms = settings.refreshSeconds * 1000;
+  if (settings.adaptiveRefresh && status !== undefined) {
+    const state = status.ci.state;
+    if (state === "running") ms = Math.min(ms, ADAPTIVE_RUNNING_FLOOR_MS);
+    else if (state === "failed") ms = Math.min(ms, ADAPTIVE_FAILED_FLOOR_MS);
+  }
+  if (probeFailures > 0) ms = Math.min(MAX_PROBE_BACKOFF_MS, ms * 2 ** Math.min(probeFailures, MAX_PROBE_BACKOFF_EXPONENT));
+  return ms;
+}
+
+/** Staleness threshold used by the automatic probe paths (tick, connect). */
+export function automaticProbeThresholdMs(settings: Settings, status: PrStatus | undefined, probeFailures: number): number {
+  return Math.max(effectiveProbeIntervalMs(settings, status, probeFailures), MIN_AUTOMATIC_PROBE_MS);
+}
 
 interface PrWorkspaceUiState {
   context: WorkspacePanelContext;
-  retained: boolean;
   confirm: { kind: "merge" | "close"; reasons: string[] } | null;
   busy: null | "probe" | "merge" | "close" | "settings" | "post-merge";
   outcome: { ok: boolean; message: string; terminalId?: string } | null;
   settingsOpen: boolean;
   draft: Settings | null;
-  lastInvalidate: number;
   /** Post-merge state: set after a successful merge to offer follow-up actions. */
   postMerge: {
     targetBranch: string;
@@ -44,13 +76,11 @@ export class PrUiController {
     }
     const created: PrWorkspaceUiState = {
       context,
-      retained: true,
       confirm: null,
       busy: null,
       outcome: null,
       settingsOpen: false,
       draft: null,
-      lastInvalidate: 0,
       postMerge: null,
     };
     this.states.set(key, created);
@@ -62,12 +92,11 @@ export class PrUiController {
     statusCache.ensureLoaded(context);
     const settings = statusCache.entrySettings(context).settings;
     const entry = statusCache.get(context);
-    const staleMs = settings.refreshSeconds * 1000;
     const shouldProbe =
       entry !== undefined &&
       settings.refreshSeconds > 0 &&
-      Date.now() - entry.probedAt > staleMs &&
-      Date.now() - entry.loadedAt > staleMs;
+      Date.now() - Math.max(entry.probeStartedAt, entry.probedAt, entry.loadedAt) >=
+        automaticProbeThresholdMs(settings, entry.status, entry.probeFailures);
     if (shouldProbe) void this.probe(context);
     else this.requestRender(state);
   }
@@ -83,32 +112,24 @@ export class PrUiController {
     const settings = statusCache.entrySettings(context).settings;
     if (settings.refreshSeconds <= 0) return;
     const entry = statusCache.get(context);
-    const staleMs = this.effectiveRefreshMs(settings, entry?.status);
     if (entry === undefined) {
       void this.probe(context);
       return;
     }
-    if (Date.now() - Math.max(entry.probedAt, entry.loadedAt) >= staleMs) void this.probe(context);
-  }
-
-  /** Compute the effective refresh interval, adapting when CI is running. */
-  private effectiveRefreshMs(settings: Settings, status: PrStatus | undefined): number {
-    const baseMs = settings.refreshSeconds * 1000;
-    if (!settings.adaptiveRefresh || status === undefined) return baseMs;
-    const ci = status.ci;
-    if (ci.state === "running") return Math.min(baseMs, 20_000);
-    if (ci.state === "failed") return Math.min(baseMs, 45_000);
-    return baseMs;
+    const threshold = automaticProbeThresholdMs(settings, entry.status, entry.probeFailures);
+    if (Date.now() - Math.max(entry.probeStartedAt, entry.probedAt, entry.loadedAt) >= threshold) void this.probe(context);
   }
 
   invalidate(context: WorkspacePanelContext): void {
     const state = this.stateFor(context);
-    const now = Date.now();
-    if (now - state.lastInvalidate < INVALIDATE_MIN_INTERVAL_MS) {
+    const entry = statusCache.get(context);
+    // Within the automatic floor a probe just ran (or is running): re-reading
+    // the scratch files is enough and avoids spawning another workspace
+    // terminal, which pi-web keeps forever.
+    if (entry !== undefined && Date.now() - entry.probeStartedAt < MIN_AUTOMATIC_PROBE_MS) {
       void statusCache.refreshFiles(context).then(() => this.requestRender(state));
       return;
     }
-    state.lastInvalidate = now;
     void this.probe(context);
   }
 
@@ -123,7 +144,7 @@ export class PrUiController {
     state.outcome = null;
     this.requestRender(state);
     try {
-      await statusCache.probe(context, { force: true });
+      await statusCache.probe(context);
     } catch (error) {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
@@ -208,7 +229,7 @@ export class PrUiController {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
       state.busy = null;
-      void statusCache.probe(context, { force: true }).catch(() => undefined);
+      void statusCache.probe(context).catch(() => undefined);
       this.requestRender(state);
     }
   }
@@ -237,7 +258,7 @@ export class PrUiController {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
       state.busy = null;
-      void statusCache.probe(context, { force: true }).catch(() => undefined);
+      void statusCache.probe(context).catch(() => undefined);
       this.requestRender(state);
     }
   }
@@ -266,7 +287,7 @@ export class PrUiController {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
       state.busy = null;
-      void statusCache.probe(context, { force: true }).catch(() => undefined);
+      void statusCache.probe(context).catch(() => undefined);
       this.requestRender(state);
     }
   }
@@ -301,7 +322,7 @@ export class PrUiController {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
       state.busy = null;
-      void statusCache.probe(context, { force: true }).catch(() => undefined);
+      void statusCache.probe(context).catch(() => undefined);
       this.requestRender(state);
     }
   }
@@ -347,7 +368,7 @@ export class PrUiController {
   }
 
   requestRender(state: PrWorkspaceUiState): void {
-    if (state.retained) state.context.host.requestRender();
+    state.context.host.requestRender();
   }
 }
 
@@ -414,6 +435,7 @@ function defineActivityElement(controller: PrUiController): void {
     private tickTimer: number | undefined;
 
     set context(value: WorkspacePanelContext | undefined) {
+      applyActivityContextSwap(controller, this.contextValue, value, this.isConnected);
       this.contextValue = value;
     }
 
@@ -422,10 +444,12 @@ function defineActivityElement(controller: PrUiController): void {
     }
 
     connectedCallback(): void {
+      // Defensive: a stray double connect must not leak a second interval.
+      if (this.tickTimer !== undefined) window.clearInterval(this.tickTimer);
       if (this.contextValue !== undefined) controller.connect(this.contextValue);
       this.tickTimer = window.setInterval(() => {
         if (this.contextValue !== undefined) controller.tick(this.contextValue);
-      }, 1_000);
+      }, TICK_INTERVAL_MS);
     }
 
     disconnectedCallback(): void {
@@ -435,6 +459,23 @@ function defineActivityElement(controller: PrUiController): void {
     }
   }
   customElements.define(ACTIVITY_ELEMENT_TAG, PrPanelActivityElement);
+}
+
+/**
+ * Context swap for the activity element: pi-web can update `.context` without
+ * remounting the element (workspace switch), so the old workspace's UI state
+ * must be released and the new one connected — otherwise stale states stay
+ * pinned in the controller map forever.
+ */
+export function applyActivityContextSwap(
+  controller: Pick<PrUiController, "connect" | "disconnect">,
+  previous: WorkspacePanelContext | undefined,
+  next: WorkspacePanelContext | undefined,
+  connected: boolean,
+): void {
+  if (previous === next || !connected) return;
+  if (previous !== undefined) controller.disconnect(previous);
+  if (next !== undefined) controller.connect(next);
 }
 
 const CI_DOT_COLORS = { passed: "#3fb950", running: "#d29922", failed: "#f85149" } as const;
@@ -762,7 +803,7 @@ function renderSettings(
             controller.updateDraft(context, (d) => { d.refreshSeconds = Number.isFinite(seconds) ? seconds : 0; return d; });
           }}
         />
-        seconds (0 = only manual refresh)
+        seconds (0 = only manual refresh; automatic probes run at most every 30s)
       </label>
       <div class="ghpr-settings-actions">
         <button type="button" class="ghpr-primary" ?disabled=${state.busy === "settings"} @click=${() => { void controller.saveSettings(context); }}>Save</button>
