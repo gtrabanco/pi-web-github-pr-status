@@ -3,6 +3,15 @@ name: Publish
 # Publicación manual desde la pestaña "Actions" → "Run workflow"
 on:
   workflow_dispatch:
+    inputs:
+      release-type:
+        description: "Tipo de versión a publicar (bump)"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
@@ -33,21 +42,54 @@ jobs:
       - name: Validate package
         run: bun run scripts/validate-package.ts
 
+      - name: Compute new version
+        id: version
+        run: |
+          PACKAGE_NAME=$(bun -e "console.log(require('./package.json').name)")
+          LOCAL_VERSION=$(bun -e "console.log(require('./package.json').version)")
+          RELEASE_TYPE="${{ github.event.inputs.release-type }}"
+
+          NEW_VERSION=$(bun -e "console.log(require('./scripts/semver').computeNextVersion('${LOCAL_VERSION}', '${RELEASE_TYPE}'))")
+
+          echo "Current: $LOCAL_VERSION"
+          echo "Bump: $RELEASE_TYPE"
+          echo "Next: $NEW_VERSION"
+
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version in package.json
+        run: |
+          bun -e "
+            const pkg = require('./package.json');
+            pkg.version = '${{ steps.version.outputs.new_version }}';
+            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add package.json
+          git commit -m "bump: v${{ steps.version.outputs.new_version }}" || true
+
       - name: Publish if version changed
         run: |
           PACKAGE_NAME=$(bun -e "console.log(require('./package.json').name)")
           LOCAL_VERSION=$(bun -e "console.log(require('./package.json').version)")
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
 
           PUBLISHED_VERSION=$(bunx npm view "$PACKAGE_NAME" version 2>/dev/null || echo "unpublished")
 
-          if [ "$LOCAL_VERSION" = "$PUBLISHED_VERSION" ]; then
-            echo "Version $LOCAL_VERSION already published — skipping."
+          if [ "$LOCAL_VERSION" = "$PUBLISHED_VERSION" ] && [ "$NEW_VERSION" = "$PUBLISHED_VERSION" ]; then
+            echo "Version $NEW_VERSION already published — skipping."
             exit 0
           fi
 
-          echo "Publishing $PACKAGE_NAME@$LOCAL_VERSION (registry has $PUBLISHED_VERSION)..."
+          if [ "$NEW_VERSION" = "$PUBLISHED_VERSION" ]; then
+            echo "New version $NEW_VERSION already published — skipping."
+            exit 0
+          fi
+
+          echo "Publishing $PACKAGE_NAME@$NEW_VERSION (registry has $PUBLISHED_VERSION)..."
 
           bunx npm@latest publish --access public
 
-          git tag "v$LOCAL_VERSION"
-          git push origin "v$LOCAL_VERSION"
+          git tag "v$NEW_VERSION"
+          git push origin "v$NEW_VERSION"
