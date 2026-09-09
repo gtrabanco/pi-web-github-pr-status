@@ -2,21 +2,28 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { statusCache } from "./cache.ts";
+import { inlineParser } from "./workerClient.ts";
+import { StatusCache } from "./cache.ts";
+import { TRIGGER_PATH, WATCH_COMMAND, WATCH_SCRIPT, WATCH_SCRIPT_PATH } from "./watch.ts";
 import { labelDescriptors } from "./labels.ts";
-import { PROBE_COMMAND } from "./probe.ts";
+import { DEFAULT_SETTINGS } from "./settings.ts";
 import type { PrStatus } from "./types.ts";
 
 /**
  * End-to-end test of the browser-side cache without a browser: a fake
  * workspace context backed by the real filesystem and a real `sh` terminal.
- * Exercises cache.probe -> scratch files -> parse -> labels.
+ * Exercises the full watcher flow: spawn → once-cycle equivalent (trigger)
+ * -> scratch files -> worker-or-inline parse -> labels. The fake terminal
+ * runs the watcher in `once` mode whenever the browser writes the trigger
+ * file, mirroring how a real watcher daemon consumes it.
  */
 
 const shAvailable = typeof (await Bun.which("sh")) === "string";
 const gitAvailable = typeof (await Bun.which("git")) === "string";
 
 let repo: string | undefined;
+
+let renders = 0;
 
 function makeContext(selected: boolean) {
   const work = repo;
@@ -33,15 +40,20 @@ function makeContext(selected: boolean) {
       },
       writeFile: async (path: string, content: string | Uint8Array) => {
         await Bun.write(join(work, path), content);
-        return { path, size: content.length, modifiedAt: new Date().toISOString() };
+        if (path === TRIGGER_PATH) void Bun.spawn(["sh", "-c", WATCH_SCRIPT, "ghpr-watch", "once"], { cwd: work, stdout: "pipe", stderr: "pipe" }).exited;
+        return { path, size: content.length, modifiedAt: new Date().toISOString(), created: true };
+      },
+      deleteFile: async (path: string) => {
+        await rm(join(work, path), { force: true });
+        return { path, existed: true };
       },
     },
     terminal: {
       runCommand: async (input: { title: string; command: string; open?: boolean }) => {
-        expect(input.command).toBe(PROBE_COMMAND);
+        expect(input.command).toBe(WATCH_COMMAND);
         expect(input.open).toBe(false);
-        const proc = Bun.spawn(["sh", "-c", input.command], { cwd: work, stdout: "pipe", stderr: "pipe" });
-        const code = await proc.exited;
+        // A real watcher daemon never completes; simulate with a pending promise.
+        void Bun.spawn(["sh", "-c", WATCH_SCRIPT, "ghpr-watch", "once"], { cwd: work, stdout: "pipe", stderr: "pipe" }).exited;
         const run = {
           id: "run-1",
           origin: "github-pr-status",
@@ -50,19 +62,16 @@ function makeContext(selected: boolean) {
           terminalId: "term-1",
           title: input.title,
           command: input.command,
-          status: code === 0 ? ("succeeded" as const) : ("failed" as const),
-          exitCode: code,
+          status: "succeeded" as const,
           createdAt: new Date().toISOString(),
           metadata: {},
         };
-        return { run, completed: Promise.resolve(run) };
+        return { run, completed: new Promise<typeof run>(() => undefined) };
       },
     },
     host: { requestRender: () => { renders += 1; } },
   };
 }
-
-let renders = 0;
 
 describe.skipIf(!shAvailable || !gitAvailable)("status cache e2e", () => {
   beforeAll(async () => {
@@ -86,10 +95,14 @@ describe.skipIf(!shAvailable || !gitAvailable)("status cache e2e", () => {
     if (repo !== undefined) await rm(`${repo}-bare`, { recursive: true, force: true });
   });
 
-  it("probe -> files -> parsed status (unpushed commit detected)", async () => {
+  it("watcher spawn -> trigger cycle -> files -> parsed status (unpushed commit detected)", async () => {
     const context = makeContext(true);
-    await statusCache.probe(context as never);
-    const status: PrStatus | undefined = statusCache.entryStatus(context as never);
+    const cache = new StatusCache(inlineParser);
+    cache.ensureLoaded(context as never);
+    await cache.ensureWatcher(context as never, DEFAULT_SETTINGS);
+    const completed = await cache.requestCycleAndWait(context as never, 10_000);
+    expect(completed).toBe(true);
+    const status: PrStatus | undefined = cache.entryStatus(context as never);
     expect(status).toBeDefined();
     expect(status?.git).toBe(true);
     expect(status?.branch).toBe("main");
@@ -103,22 +116,27 @@ describe.skipIf(!shAvailable || !gitAvailable)("status cache e2e", () => {
 
   it("labels stay quiet without an open PR", async () => {
     const context = makeContext(true);
-    statusCache.ensureLoaded(context as never);
-    const status = statusCache.entryStatus(context as never);
+    const cache = new StatusCache(inlineParser);
+    cache.ensureLoaded(context as never);
+    await cache.requestCycleAndWait(context as never, 10_000);
+    const status = cache.entryStatus(context as never);
     expect(labelDescriptors(status, true)).toEqual([]);
   });
 
   it("ensureLoaded skips non-selected workspaces", () => {
     const context = makeContext(false);
     context.workspace = { id: "ws-other", projectId: "p-other", path: context.workspace.path, label: "other", isMain: false };
-    const entry = statusCache.ensureLoaded(context as never);
+    const cache = new StatusCache(inlineParser);
+    const entry = cache.ensureLoaded(context as never);
     expect(entry.status).toBeUndefined();
     expect(entry.loadedAt).toBe(0);
   });
 
   it("statusByKey serves palette actions", async () => {
     const context = makeContext(true);
-    expect(statusCache.statusByKey("local", "p1", "ws1")?.ahead).toBe(1);
-    expect(statusCache.statusByKey("other-machine", "p1", "ws1")).toBeUndefined();
+    const cache = new StatusCache(inlineParser);
+    await cache.requestCycleAndWait(context as never, 10_000);
+    expect(cache.statusByKey("local", "p1", "ws1")?.ahead).toBe(1);
+    expect(cache.statusByKey("other-machine", "p1", "ws1")).toBeUndefined();
   });
 });

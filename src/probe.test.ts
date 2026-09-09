@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { PROBE_COMMAND, PROBE_SCRIPT, parseProbeResult, probeFileReader, readAllProbeFiles } from "./probe.ts";
+import { parseProbeResult, probeFileReader, readAllProbeFiles } from "./probe.ts";
 import type { PrStatus } from "./types.ts";
 
 const GH_PR_JSON = JSON.stringify({
@@ -141,35 +141,6 @@ describe("parseProbeResult", () => {
   it("normalizes trailing whitespace in branch names", async () => {
     const status = await fixture({ branch: "  feat/monitor  \n" });
     expect(status.branch).toBe("feat/monitor");
-  });
-});
-
-describe("probe artifacts", () => {
-  it("uses a single static command without interpolated user input", () => {
-    expect(PROBE_COMMAND).toBe("sh .pi-web/github-pr/probe.sh");
-    expect(PROBE_COMMAND.includes("'")).toBe(false);
-  });
-
-  it("probe script is POSIX sh, writes the marker last and exits 0", () => {
-    expect(PROBE_SCRIPT.startsWith("#!/bin/sh")).toBe(true);
-    expect(PROBE_SCRIPT.includes("exit 0")).toBe(true);
-    const markerIndex = PROBE_SCRIPT.indexOf("probe.json");
-    expect(markerIndex).toBeGreaterThan(0);
-    // marker (probe.json) must be referenced after every other scratch file write
-    for (const name of ["branch.txt", "head.txt", "upstream.txt", "staged.txt", "unstaged.txt", "untracked.txt", "pr.json", "gh.err"]) {
-      const firstUse = PROBE_SCRIPT.indexOf(name);
-      expect(firstUse, name).toBeGreaterThanOrEqual(0);
-      if (name !== "gh.err") expect(firstUse, `${name} before marker`).toBeLessThan(markerIndex);
-    }
-  });
-
-  it("probe script excludes its own scratch dir from untracked counts", () => {
-    expect(PROBE_SCRIPT).toContain("git ls-files --others");
-    expect(PROBE_SCRIPT).toContain("--exclude=.pi-web/github-pr/");
-  });
-
-  it("probe script computes ahead/behind against the upstream", () => {
-    expect(PROBE_SCRIPT).toContain('git rev-list --left-right --count "@{u}"..."HEAD"');
   });
 });
 

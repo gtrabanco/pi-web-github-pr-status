@@ -100,20 +100,20 @@ Missing or invalid values fall back to defaults with a warning in the panel. Tip
 
 ## How it works (no magic)
 
-The plugin is **browser-only**. To get machine facts it writes a small POSIX `probe.sh` into `.pi-web/github-pr/`, runs it through the workspace terminal helper, and reads back per-fact files (`branch.txt`, `staged.txt`, `pr.json`, …) written by the script. PR/CI data comes from `gh pr view --json …` using the machine's existing gh auth; worktree facts come from `git`. Nothing leaves the machine except GitHub API calls made by `gh` itself.
+The plugin is **browser-only**. To get machine facts it writes a small POSIX `watch.sh` into `.pi-web/github-pr/` and runs it **once** through the workspace terminal helper as a long-lived watcher loop; the watcher collects the same per-fact files (`branch.txt`, `staged.txt`, `pr.json`, …) every cycle and the browser reads them back through the files API. PR/CI data comes from `gh pr view --json …` (each `gh` call bounded by `timeout 20`) using the machine's existing gh auth; worktree facts come from `git`. Nothing leaves the machine except GitHub API calls made by `gh` itself.
 
-Refresh happens when you open the workspace panel, on the configured interval (visible tab only), on palette refresh, and after merge/close actions. Labels for non-selected workspaces show the last data read from disk.
+Refresh happens when you open the workspace panel, on the configured interval (driven by the watcher, visible tab only), on palette refresh (a `trigger` file poke), and after merge/close actions. Labels for non-selected workspaces show the last data read from disk. Parsing (including large CI rollups) and result serialization run in a Web Worker off the page's main thread, with an inline fallback.
 
 ## Performance & reliability
 
-The plugin is deliberately frugal with the one resource it cannot recycle: **workspace terminals**. In PI WEB, every `terminal.runCommand()` creates a terminal that is currently kept forever — server-side records and the Terminal panel's list grow without garbage collection (closing them from a plugin needs [jmfederico/pi-web#225](https://github.com/jmfederico/pi-web/issues/225)). The probe is the only command the plugin runs periodically, so its cadence is bounded:
+The plugin is deliberately frugal with the one resource it cannot recycle: **workspace terminals**. In PI WEB, every `terminal.runCommand()` creates a terminal that is currently kept forever — server-side records and the Terminal panel's list grow without garbage collection (closing them from a plugin needs [jmfederico/pi-web#225](https://github.com/jmfederico/pi-web/issues/225)). The watcher model keeps the terminal count at **one per workspace**:
 
-- **Visible-tab only.** Automatic probes run only while the Pull Request panel is the active tool and the browser tab is visible; hidden tabs probe nothing.
-- **30 s automatic floor.** Even with `refreshSeconds` set lower, automatic probes (interval tick, surface invalidation) are spaced at least 30 s apart. The Refresh button always re-probes immediately.
-- **Adaptive, not aggressive.** With CI running the interval drops to at most 30 s (60 s while failing) — never the 20 s of older versions, which could leave ~180 terminal records per hour of CI watching.
-- **Exponential backoff.** When consecutive probes fail (hung `gh`, network outage, machine asleep) the automatic interval doubles per failure up to 15 minutes, so a broken machine cannot pile up stuck ptys. The panel keeps showing the last error until a probe succeeds; manual Refresh always retries.
-- **Cheap invalidations.** Invalidation bursts within the floor re-read the probe's scratch files instead of spawning new terminals, and the probe script is written only when missing or changed (no file-explorer refresh churn every cycle).
-- **Bounded browser memory.** Per-workspace state is capped (32 cache entries) and released when a panel unmounts or the host swaps the workspace under the panel.
+- **One long-lived watcher terminal.** Instead of one terminal per probe, the plugin spawns a single `watch.sh` loop terminal per workspace. The watcher writes its scratch files on the configured interval, answers a `trigger` file for instant manual refresh, and never spawns more terminals.
+- **Self-terminating.** The watcher exits (and removes its `watcher.json` state file) when the browser writes the `stop` file (`refreshSeconds: 0`), when the interval drops to 0, or after 12 hours of continuous operation. If it dies for any other reason, the browser detects the stale heartbeat and respawns it with exponential backoff (60 s doubling, capped at 15 minutes).
+- **No terminal per refresh.** Manual refresh, panel invalidation and post-merge/post-close updates only touch files: a `trigger` poke plus a scratch-file re-read. Merge/close still run one terminal each (explicit user action).
+- **Off-thread parsing.** Raw files are parsed and serialized in a Web Worker; the main thread only string-compares results and calls `requestRender()` when something actually changed. If workers are unavailable, parsing falls back inline without losing functionality.
+- **Adaptive cadence.** With CI running the cycle interval drops to at most 30 s (60 s while failing); otherwise the configured `refreshSeconds` applies.
+- **Bounded browser memory.** Per-workspace state is capped (32 cache entries) and released when a panel unmounts or the host swaps the workspace under the panel; settings files are re-read at most every 30 s.
 
 ## Development
 
@@ -121,7 +121,7 @@ The plugin is deliberately frugal with the one resource it cannot recycle: **wor
 bun install          # deps (bun)
 bun run typecheck    # tsc (TypeScript 7 native)
 bun test             # unit + integration tests (probe script runs for real)
-bun run build        # bundle -> dist/index.js
+bun run build        # bundle -> dist/index.js + dist/statusWorker.js (worker)
 bun run check        # all of the above + package contract validation
 ```
 

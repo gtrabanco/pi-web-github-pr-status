@@ -4,7 +4,7 @@ import type {
   WorkspacePanelContext,
   WorkspacePanelContribution,
 } from "@jmfederico/pi-web/plugin-api";
-import { runWorkspaceCommand, statusCache } from "./cache.ts";
+import { runWorkspaceCommand, statusCache, StatusCache, CYCLE_WAIT_TIMEOUT_MS } from "./cache.ts";
 import { buildCheckoutTargetCommand, buildCloseCommand, buildDeleteLocalBranchCommand, buildMergeCommand, evaluateClose, evaluateMerge, explainCiState } from "./guards.ts";
 import { DEFAULT_SETTINGS, MERGE_METHODS, serializeSettings, type Settings } from "./settings.ts";
 import { PLUGIN_ID, SETTINGS_PATH } from "./types.ts";
@@ -13,42 +13,8 @@ import type { PrStatus } from "./types.ts";
 export const PANEL_LOCAL_ID = "workspace.pr";
 const ACTIVITY_ELEMENT_TAG = "pi-web-github-pr-activity";
 const MERGE_CLOSE_TIMEOUT_MS = 60_000;
-
-/** Automatic probes never run more often than this, whatever the settings say. */
-export const MIN_AUTOMATIC_PROBE_MS = 30_000;
-/** Lower bound for the adaptive interval while CI is running. */
-export const ADAPTIVE_RUNNING_FLOOR_MS = 30_000;
-/** Lower bound for the adaptive interval while CI is failing. */
-export const ADAPTIVE_FAILED_FLOOR_MS = 60_000;
-/** Upper bound for the failure backoff multiplier. */
-export const MAX_PROBE_BACKOFF_MS = 15 * 60_000;
-const MAX_PROBE_BACKOFF_EXPONENT = 5;
-/** Activity-element timer cadence; probes fire when their interval elapses. */
+/** Activity-element timer cadence: keeps files fresh and the watcher alive. */
 const TICK_INTERVAL_MS = 5_000;
-
-/**
- * Interval between automatic probes for a workspace. Every probe spawns a
- * workspace terminal that pi-web currently keeps forever (no close API —
- * jmfederico/pi-web#225), so this must stay conservative: the configured
- * interval, optionally lowered by the adaptive CI floors, then stretched
- * exponentially while consecutive probes keep failing (hung `gh`, network
- * outage) so a broken machine cannot fork-bomb itself with stuck ptys.
- */
-export function effectiveProbeIntervalMs(settings: Settings, status: PrStatus | undefined, probeFailures: number): number {
-  let ms = settings.refreshSeconds * 1000;
-  if (settings.adaptiveRefresh && status !== undefined) {
-    const state = status.ci.state;
-    if (state === "running") ms = Math.min(ms, ADAPTIVE_RUNNING_FLOOR_MS);
-    else if (state === "failed") ms = Math.min(ms, ADAPTIVE_FAILED_FLOOR_MS);
-  }
-  if (probeFailures > 0) ms = Math.min(MAX_PROBE_BACKOFF_MS, ms * 2 ** Math.min(probeFailures, MAX_PROBE_BACKOFF_EXPONENT));
-  return ms;
-}
-
-/** Staleness threshold used by the automatic probe paths (tick, connect). */
-export function automaticProbeThresholdMs(settings: Settings, status: PrStatus | undefined, probeFailures: number): number {
-  return Math.max(effectiveProbeIntervalMs(settings, status, probeFailures), MIN_AUTOMATIC_PROBE_MS);
-}
 
 interface PrWorkspaceUiState {
   context: WorkspacePanelContext;
@@ -65,7 +31,12 @@ interface PrWorkspaceUiState {
 }
 
 export class PrUiController {
+  private readonly cache: StatusCache;
   private readonly states = new Map<string, PrWorkspaceUiState>();
+
+  constructor(cache: StatusCache = statusCache) {
+    this.cache = cache;
+  }
 
   stateFor(context: WorkspacePanelContext): PrWorkspaceUiState {
     const key = `${context.machine.id}:${context.workspace.projectId}:${context.workspace.id}`;
@@ -89,16 +60,9 @@ export class PrUiController {
 
   connect(context: WorkspacePanelContext): void {
     const state = this.stateFor(context);
-    statusCache.ensureLoaded(context);
-    const settings = statusCache.settingsOf(context);
-    const entry = statusCache.get(context);
-    const shouldProbe =
-      entry !== undefined &&
-      settings.refreshSeconds > 0 &&
-      Date.now() - Math.max(entry.probeStartedAt, entry.probedAt, entry.loadedAt) >=
-        automaticProbeThresholdMs(settings, entry.status, entry.probeFailures);
-    if (shouldProbe) void this.probe(context);
-    else this.requestRender(state);
+    this.cache.ensureLoaded(context);
+    void this.syncWatcher(context);
+    this.requestRender(state);
   }
 
   disconnect(context: WorkspacePanelContext): void {
@@ -106,45 +70,42 @@ export class PrUiController {
     this.states.delete(key);
   }
 
-  /** Timer tick from the activity element: probe when the interval elapsed. */
+  /** Timer tick from the activity element: keep files fresh and the watcher alive. */
   tick(context: WorkspacePanelContext): void {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-    const settings = statusCache.settingsOf(context);
-    if (settings.refreshSeconds <= 0) return;
-    const entry = statusCache.get(context);
-    if (entry === undefined) {
-      void this.probe(context);
-      return;
+    this.cache.ensureLoaded(context);
+    void this.syncWatcher(context);
+  }
+
+  /** Ensure the watcher terminal exists and matches the current cadence. */
+  private async syncWatcher(context: WorkspacePanelContext): Promise<void> {
+    try {
+      await this.cache.ensureWatcher(context, this.cache.settingsOf(context));
+    } catch {
+      // Spawn failures are counted inside the cache and surface via backoff.
     }
-    const threshold = automaticProbeThresholdMs(settings, entry.status, entry.probeFailures);
-    if (Date.now() - Math.max(entry.probeStartedAt, entry.probedAt, entry.loadedAt) >= threshold) void this.probe(context);
   }
 
   invalidate(context: WorkspacePanelContext): void {
     const state = this.stateFor(context);
-    const entry = statusCache.get(context);
-    // Within the automatic floor a probe just ran (or is running): re-reading
-    // the scratch files is enough and avoids spawning another workspace
-    // terminal, which pi-web keeps forever.
-    if (entry !== undefined && Date.now() - entry.probeStartedAt < MIN_AUTOMATIC_PROBE_MS) {
-      void statusCache.refreshFiles(context).then(() => this.requestRender(state));
-      return;
-    }
-    void this.probe(context);
+    // Reading the scratch files is free; an immediate watcher cycle costs one
+    // trigger-file write — never a terminal, which pi-web keeps forever.
+    this.cache.requestCycle(context);
+    void statusCache
+      .refreshFiles(context)
+      .then(() => this.requestRender(state))
+      .catch(() => this.requestRender(state));
   }
 
   async refresh(context: WorkspacePanelContext): Promise<void> {
-    await this.probe(context);
-  }
-
-  async probe(context: WorkspacePanelContext): Promise<void> {
     const state = this.stateFor(context);
     if (state.busy !== null) return;
     state.busy = "probe";
     state.outcome = null;
     this.requestRender(state);
     try {
-      await statusCache.probe(context);
+      const completed = await this.cache.requestCycleAndWait(context, CYCLE_WAIT_TIMEOUT_MS);
+      if (!completed) state.outcome = { ok: false, message: "Watcher did not complete a refresh cycle in time. Press Refresh to retry." };
     } catch (error) {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
@@ -155,8 +116,8 @@ export class PrUiController {
 
   onMergeClick(context: WorkspacePanelContext): void {
     const state = this.stateFor(context);
-    const status = statusCache.entryStatus(context);
-    const settings = statusCache.settingsOf(context);
+    const status = this.cache.entryStatus(context);
+    const settings = this.cache.settingsOf(context);
     const evaluation = evaluateMerge(status, settings);
     if (!evaluation.canMerge) {
       state.confirm = null;
@@ -175,7 +136,7 @@ export class PrUiController {
 
   onCloseClick(context: WorkspacePanelContext): void {
     const state = this.stateFor(context);
-    const status = statusCache.entryStatus(context);
+    const status = this.cache.entryStatus(context);
     const evaluation = evaluateClose(status);
     if (!evaluation.canClose) {
       state.confirm = null;
@@ -229,7 +190,8 @@ export class PrUiController {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
       state.busy = null;
-      void statusCache.probe(context).catch(() => undefined);
+      this.cache.requestCycle(context);
+      void this.cache.refreshFiles(context).catch(() => undefined);
       this.requestRender(state);
     }
   }
@@ -258,7 +220,8 @@ export class PrUiController {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
       state.busy = null;
-      void statusCache.probe(context).catch(() => undefined);
+      this.cache.requestCycle(context);
+      void this.cache.refreshFiles(context).catch(() => undefined);
       this.requestRender(state);
     }
   }
@@ -287,7 +250,8 @@ export class PrUiController {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
       state.busy = null;
-      void statusCache.probe(context).catch(() => undefined);
+      this.cache.requestCycle(context);
+      void this.cache.refreshFiles(context).catch(() => undefined);
       this.requestRender(state);
     }
   }
@@ -322,14 +286,15 @@ export class PrUiController {
       state.outcome = { ok: false, message: errorMessage(error) };
     } finally {
       state.busy = null;
-      void statusCache.probe(context).catch(() => undefined);
+      this.cache.requestCycle(context);
+      void this.cache.refreshFiles(context).catch(() => undefined);
       this.requestRender(state);
     }
   }
 
   updateDraft(context: WorkspacePanelContext, mutate: (draft: Settings) => Settings): void {
     const state = this.stateFor(context);
-    const current = state.draft ?? statusCache.settingsOf(context);
+    const current = state.draft ?? this.cache.settingsOf(context);
     state.draft = mutate({ ...current, merge: { ...current.merge } });
     this.requestRender(state);
   }
@@ -343,7 +308,7 @@ export class PrUiController {
 
   async saveSettings(context: WorkspacePanelContext): Promise<void> {
     const state = this.stateFor(context);
-    const draft = state.draft ?? statusCache.settingsOf(context);
+    const draft = state.draft ?? this.cache.settingsOf(context);
     state.busy = "settings";
     state.outcome = null;
     this.requestRender(state);
@@ -356,7 +321,7 @@ export class PrUiController {
       state.outcome = { ok: false, message: `Could not save settings: ${errorMessage(error)}` };
     } finally {
       state.busy = null;
-      void statusCache.refreshFiles(context).catch(() => undefined);
+      void this.cache.refreshFiles(context).catch(() => undefined);
       this.requestRender(state);
     }
   }
@@ -803,7 +768,7 @@ function renderSettings(
             controller.updateDraft(context, (d) => { d.refreshSeconds = Number.isFinite(seconds) ? seconds : 0; return d; });
           }}
         />
-        seconds (0 = only manual refresh; automatic probes run at most every 30s)
+        seconds (0 = pauses the background watcher; adaptive refresh runs at most every 30s)
       </label>
       <div class="ghpr-settings-actions">
         <button type="button" class="ghpr-primary" ?disabled=${state.busy === "settings"} @click=${() => { void controller.saveSettings(context); }}>Save</button>

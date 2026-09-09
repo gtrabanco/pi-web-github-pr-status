@@ -48,7 +48,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun build src/index.ts --outfile dist/index.js --target browser",
+    "build": "bun build src/index.ts --outfile dist/index.js --target browser && bun build src/statusWorker.ts --outfile dist/statusWorker.js --target browser",
     "check": "bun run typecheck && bun run test && bun run build && bun run scripts/validate-package.ts",
     "release:status": "bun run scripts/release.ts --status",
     "release:patch": "bun run scripts/release.ts --set-next patch",
