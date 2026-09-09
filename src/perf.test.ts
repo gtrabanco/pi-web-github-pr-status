@@ -421,6 +421,17 @@ describe("applyActivityContextSwap", () => {
     expect(record.disconnected).toEqual([]);
     expect(record.connected).toEqual([]);
   });
+
+  it("treats fresh context objects for the same workspace as one connection (no reconnect — prevents the PI WEB render loop)", () => {
+    record.connected.length = 0;
+    record.disconnected.length = 0;
+    // PI WEB fabricates a brand-new context object per render even for the same
+    // workspace; object identity must not be what drives connect/disconnect.
+    const ctxAFresh = { workspace: { id: "a" } } as never;
+    applyActivityContextSwap(controller, ctxA, ctxAFresh, true);
+    expect(record.disconnected).toEqual([]);
+    expect(record.connected).toEqual([]);
+  });
 });
 
 describe("interval serialization", () => {

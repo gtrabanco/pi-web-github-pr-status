@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The project follows [st
 - Watcher self-termination (`stop` file, interval 0, 12 h lifetime cap), stale-heartbeat detection and respawn with exponential backoff (capped at 15 min).
 - Status parsing and serialization moved to a Web Worker (inline fallback) so large CI rollups never block the page's main thread.
 - Settings file re-read at most every 30 s; `gh` calls inside the watcher are bounded by `timeout 20`.
+- Fixed Pull Request panel freeze: the host passes a **brand-new context object** on every render, and the activity element was treating object identity as a disconnect/reconnect. That made `connect()` → `requestRender()` → fresh context → swap → `connect()` loop forever, freezing pi-web whenever the tab was opened (closing it stopped the loop). The context swap now keys on the **workspace identity** (machine + project + workspace) instead of the object reference, so same-workspace re-renders no longer re-trigger a render.
 
 ## 0.1.2 — 2026-09-09 (Patch release)
 

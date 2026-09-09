@@ -431,6 +431,15 @@ function defineActivityElement(controller: PrUiController): void {
  * remounting the element (workspace switch), so the old workspace's UI state
  * must be released and the new one connected — otherwise stale states stay
  * pinned in the controller map forever.
+ *
+ * IMPORTANT: PI WEB hands a **brand-new context object** to `render` on every
+ * host render (`createWorkspacePanelContext` builds a fresh object per call),
+ * even when the selected workspace is unchanged. Treating that fresh object as
+ * disconnect/reconnect loops forever: connect() → requestRender() → host
+ * re-renders with a fresh context → swap → connect() → … To break the loop we
+ * key on the **workspace identity** (machine + project + workspace), so two
+ * fresh contexts for the same workspace are treated as the same connection and
+ * never re-trigger a render.
  */
 export function applyActivityContextSwap(
   controller: Pick<PrUiController, "connect" | "disconnect">,
@@ -438,9 +447,17 @@ export function applyActivityContextSwap(
   next: WorkspacePanelContext | undefined,
   connected: boolean,
 ): void {
-  if (previous === next || !connected) return;
+  if (!connected) return;
+  if (previous !== undefined && next !== undefined && workspaceKeyOf(previous) === workspaceKeyOf(next)) {
+    return;
+  }
   if (previous !== undefined) controller.disconnect(previous);
   if (next !== undefined) controller.connect(next);
+}
+
+/** Identity of a panel context: same machine + project + workspace. */
+function workspaceKeyOf(context: { machine?: { id?: string }; workspace?: { projectId?: string; id?: string } }): string {
+  return `${context.machine?.id ?? ""}:${context.workspace?.projectId ?? ""}:${context.workspace?.id ?? ""}`;
 }
 
 const CI_DOT_COLORS = { passed: "#3fb950", running: "#d29922", failed: "#f85149" } as const;
