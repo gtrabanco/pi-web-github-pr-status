@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The project follows [st
 - Status parsing and serialization moved to a Web Worker (inline fallback) so large CI rollups never block the page's main thread.
 - Settings file re-read at most every 30 s; `gh` calls inside the watcher are bounded by `timeout 20`.
 
+## 0.1.2 — 2026-09-09 (Patch release)
+
+- See commit history for details.
+
 ## 0.1.1 — 2026-09-08 (Patch release)
 
 - See commit history for details.
