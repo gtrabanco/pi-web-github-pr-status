@@ -42,6 +42,19 @@ const FILE_TTL_MS = 10_000;
 const PROBE_TIMEOUT_MS = 25_000;
 const MAX_ENTRIES = 32;
 
+/**
+ * Shared read-only entry returned for every non-selected workspace. Label
+ * and panel callbacks run for every workspace on every host render, so a
+ * frozen singleton avoids allocating a throwaway object each time.
+ */
+const COLD_ENTRY: CacheEntry = Object.freeze({
+  settingsWarnings: [],
+  loadedAt: 0,
+  probedAt: 0,
+  probeStartedAt: 0,
+  probeFailures: 0,
+});
+
 function contextKey(context: WorkspaceContext): string {
   return `${context.machine.id}:${context.workspace.projectId}:${context.workspace.id}`;
 }
@@ -110,6 +123,11 @@ export class StatusCache {
     };
   }
 
+  /** Settings only, with no wrapper allocation — the hot label/panel path. */
+  settingsOf(context: WorkspaceContext): Settings {
+    return this.entries.get(contextKey(context))?.settings ?? DEFAULT_SETTINGS;
+  }
+
   /**
    * Synchronous cache access for label/panel callbacks: returns the current
    * entry and kicks off a scratch-file refresh when data is missing or stale.
@@ -121,9 +139,7 @@ export class StatusCache {
     if (entry === undefined) {
       // Only the selected workspace self-populates; other list entries stay
       // cold so labels never trigger bursts of reads for unseen workspaces.
-      if (context.state?.selectedWorkspace?.id !== context.workspace.id) {
-        return { settingsWarnings: [], loadedAt: 0, probedAt: 0, probeStartedAt: 0, probeFailures: 0 };
-      }
+      if (context.state?.selectedWorkspace?.id !== context.workspace.id) return COLD_ENTRY;
       entry = this.evictAndCreate(key);
     }
     entry.host = context.host;
@@ -192,10 +208,15 @@ export class StatusCache {
     if (entry.reading !== undefined) return entry.reading;
     entry.reading = (async () => {
       try {
-        const files: ProbeFiles = await readAllProbeFiles((path) => context.files.readFile(path));
+        // Read the probe files and settings concurrently: both are independent
+        // reads that only converge in apply(), so doing them together shaves a
+        // round-trip off every refresh without changing semantics.
+        const [files, settingsResult] = await Promise.all([
+          readAllProbeFiles((path) => context.files.readFile(path)),
+          readSettings(context),
+        ]);
         const status = parseProbeResult(files);
-        const { settings, warnings, error } = await readSettings(context);
-        this.apply(entry, status, settings, warnings, error);
+        this.apply(entry, status, settingsResult.settings, settingsResult.warnings, settingsResult.error);
       } catch (error) {
         entry.settingsError = error instanceof Error ? error.message : String(error);
       } finally {

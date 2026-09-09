@@ -181,9 +181,11 @@ describe("PrUiController automatic probe bounds", () => {
   it("invalidate reads files instead of probing within the automatic floor", async () => {
     const { context, calls } = fakeContext(PROBE_SCRIPT, "invalidate-floor");
     statusCache.ensureLoaded(context as never);
-    const entry = statusCache.get(context as never);
+    const entry = statusCache.get(context as never)!;
     expect(entry).toBeDefined();
-    entry!.probeStartedAt = Date.now() - 5_000;
+    // Let the ensureLoaded-triggered read settle so refreshFiles starts a fresh one.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    entry.probeStartedAt = Date.now() - 5_000;
     const readsBefore = calls.readFile;
 
     new PrUiController().invalidate(context as never);
@@ -230,6 +232,43 @@ describe("PrUiController automatic probe bounds", () => {
     new PrUiController().tick(context as never);
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(calls.runCommand).toBe(1);
+  });
+});
+
+describe("statusCache accessor efficiency", () => {
+  it("returns the same frozen cold entry for non-selected workspaces (no per-call allocation)", () => {
+    const { context } = fakeContext(PROBE_SCRIPT, "cold-singleton");
+    // Non-selected: the selected workspace in state no longer matches the label's workspace.
+    const ctx = { ...(context as object), workspace: { id: "other", projectId: "p", path: "/tmp/x", label: "x", isMain: false }, state: { selectedWorkspace: { id: "s", projectId: "p" } } } as never;
+    const first = statusCache.ensureLoaded(ctx);
+    const second = statusCache.ensureLoaded(ctx);
+    expect(first).toBe(second);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(first.settings).toBeUndefined();
+    expect(first.status).toBeUndefined();
+  });
+
+  it("settingsOf mirrors entrySettings().settings", async () => {
+    const { context } = fakeContext(PROBE_SCRIPT, "settings-of");
+    await statusCache.probe(context as never);
+    const viaSettingsOf = statusCache.settingsOf(context as never);
+    const viaEntry = statusCache.entrySettings(context as never).settings;
+    expect(viaSettingsOf).toBe(viaEntry);
+    expect(viaSettingsOf).toBe(DEFAULT_SETTINGS);
+  });
+
+  it("settingsOf returns DEFAULT_SETTINGS when no entry exists", () => {
+    const { context } = fakeContext(PROBE_SCRIPT, "settings-none");
+    expect(statusCache.settingsOf(context as never)).toBe(DEFAULT_SETTINGS);
+  });
+
+  it("refreshFiles re-reads scratch files and settings", async () => {
+    const { context, calls } = fakeContext(PROBE_SCRIPT, "refresh-files");
+    // No prior entry: refreshFiles creates one and performs a fresh read.
+    await statusCache.refreshFiles(context as never);
+    const entry = statusCache.get(context as never)!;
+    expect(calls.readFile).toBeGreaterThan(0);
+    expect(entry.loadedAt).toBeGreaterThan(0);
   });
 });
 

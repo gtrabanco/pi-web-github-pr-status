@@ -90,7 +90,7 @@ export class PrUiController {
   connect(context: WorkspacePanelContext): void {
     const state = this.stateFor(context);
     statusCache.ensureLoaded(context);
-    const settings = statusCache.entrySettings(context).settings;
+    const settings = statusCache.settingsOf(context);
     const entry = statusCache.get(context);
     const shouldProbe =
       entry !== undefined &&
@@ -109,7 +109,7 @@ export class PrUiController {
   /** Timer tick from the activity element: probe when the interval elapsed. */
   tick(context: WorkspacePanelContext): void {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-    const settings = statusCache.entrySettings(context).settings;
+    const settings = statusCache.settingsOf(context);
     if (settings.refreshSeconds <= 0) return;
     const entry = statusCache.get(context);
     if (entry === undefined) {
@@ -156,7 +156,7 @@ export class PrUiController {
   onMergeClick(context: WorkspacePanelContext): void {
     const state = this.stateFor(context);
     const status = statusCache.entryStatus(context);
-    const settings = statusCache.entrySettings(context).settings;
+    const settings = statusCache.settingsOf(context);
     const evaluation = evaluateMerge(status, settings);
     if (!evaluation.canMerge) {
       state.confirm = null;
@@ -329,7 +329,7 @@ export class PrUiController {
 
   updateDraft(context: WorkspacePanelContext, mutate: (draft: Settings) => Settings): void {
     const state = this.stateFor(context);
-    const current = state.draft ?? statusCache.entrySettings(context).settings;
+    const current = state.draft ?? statusCache.settingsOf(context);
     state.draft = mutate({ ...current, merge: { ...current.merge } });
     this.requestRender(state);
   }
@@ -343,7 +343,7 @@ export class PrUiController {
 
   async saveSettings(context: WorkspacePanelContext): Promise<void> {
     const state = this.stateFor(context);
-    const draft = state.draft ?? statusCache.entrySettings(context).settings;
+    const draft = state.draft ?? statusCache.settingsOf(context);
     state.busy = "settings";
     state.outcome = null;
     this.requestRender(state);
@@ -413,7 +413,7 @@ export function createPanelContribution(
       return true;
     },
     badge: (context) => {
-      const settings = statusCache.entrySettings(context).settings;
+      const settings = statusCache.settingsOf(context);
       if (!settings.showCI) return undefined;
       const ci = statusCache.get(context)?.status?.ci;
       if (ci === undefined || ci.state === "none" || ci.state === "passed") return undefined;
@@ -483,7 +483,7 @@ const CI_DOT_COLORS = { passed: "#3fb950", running: "#d29922", failed: "#f85149"
 function renderPanel(html: HtmlTemplateTag, controller: PrUiController, context: WorkspacePanelContext) {
   const state = controller.stateFor(context);
   const entry = statusCache.ensureLoaded(context);
-  const settings = state.draft ?? statusCache.entrySettings(context).settings;
+  const settings = state.draft ?? statusCache.settingsOf(context);
   const status = entry.status;
   const busy = state.busy !== null;
 
