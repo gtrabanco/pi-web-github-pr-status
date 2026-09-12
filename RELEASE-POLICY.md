@@ -27,7 +27,7 @@ Register it with `bun run release:patch`, `bun run release:minor` or `bun run re
 ## Publishing
 
 ```bash
-bun run publish
+bun run release
 ```
 
 From a **clean `main`** worktree, the script:

@@ -125,7 +125,7 @@ bun run build        # bundle -> dist/index.js + dist/statusWorker.js (worker)
 bun run check        # all of the above + package contract validation
 ```
 
-Local CI is intentionally local: there is no hosted CI for this package; `bun run check` is the full gate and `bun run publish` runs it before every release.
+Local CI is intentionally local: there is no hosted CI for this package; `bun run check` is the full gate and `bun run release` runs it before every release.
 
 ### Releases (strict semver)
 
@@ -138,7 +138,7 @@ Local CI is intentionally local: there is no hosted CI for this package; `bun ru
 2. When it is time to ship, from a clean `main`:
 
    ```bash
-   bun run publish
+   bun run release
    ```
 
    The script runs the full check suite, bumps the version according to the registered `nextRelease`, resets the marker to `patch`, updates `CHANGELOG.md`, commits `chore(release): vX.Y.Z`, tags `vX.Y.Z`, publishes with `bun publish`, and pushes the tag.

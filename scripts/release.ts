@@ -2,13 +2,13 @@
  * Release tooling for @gtrabanco/pi-web-github-pr-status.
  *
  * Strict semver policy (see RELEASE-POLICY.md): the kind of the NEXT release
- * is registered in package.json (`nextRelease`), and `bun run publish`
+ * is registered in package.json (`nextRelease`), and `bun run release`
  * applies it: check → bump → build → changelog → commit → tag → publish.
  *
  * Commands (all wired as bun scripts):
  *   bun run release:status            show version state
  *   bun run release:patch|minor|major register the next release kind
- *   bun run publish                   full release flow
+ *   bun run release                   full release flow
  */
 import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
@@ -106,7 +106,7 @@ async function setNext(kind: string): Promise<void> {
   const pkg = await readPackageJson();
   parseVersion(pkg.version);
   await savePackageJson(pkg, pkg.version, nextRelease);
-  console.log(`nextRelease registered: ${nextRelease}. Run \`bun run publish\` to release.`);
+  console.log(`nextRelease registered: ${nextRelease}. Run \`bun run release\` to release.`);
 }
 
 async function publish(): Promise<void> {

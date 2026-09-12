@@ -50,46 +50,48 @@ jobs:
           RELEASE_TYPE="${{ github.event.inputs.release-type }}"
 
           NEW_VERSION=$(bun -e "console.log(require('./scripts/semver').computeNextVersion('${LOCAL_VERSION}', '${RELEASE_TYPE}'))")
+          PUBLISHED_VERSION=$(bunx npm view "$PACKAGE_NAME@$NEW_VERSION" version 2>/dev/null || true)
 
           echo "Current: $LOCAL_VERSION"
           echo "Bump: $RELEASE_TYPE"
           echo "Next: $NEW_VERSION"
 
+          # Decide BEFORE touching package.json: a re-run of an already released
+          # version must be a no-op, not advance the repository version.
+          if [ "$PUBLISHED_VERSION" = "$NEW_VERSION" ]; then
+            echo "$NEW_VERSION is already published — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Bump version in package.json
+      - name: Bump version, commit and push
+        if: steps.version.outputs.skip != 'true'
         run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
           bun -e "
             const pkg = require('./package.json');
-            pkg.version = '${{ steps.version.outputs.new_version }}';
+            pkg.version = '${NEW_VERSION}';
             require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add package.json
-          git commit -m "bump: v${{ steps.version.outputs.new_version }}" || true
+          git commit -m "chore(release): v${NEW_VERSION}"
+          # Keep the repository version in sync with the registry: without this
+          # push the next run recomputes the same version and skips forever.
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
-      - name: Publish if version changed
+      - name: Publish
+        if: steps.version.outputs.skip != 'true'
         run: |
-          PACKAGE_NAME=$(bun -e "console.log(require('./package.json').name)")
-          LOCAL_VERSION=$(bun -e "console.log(require('./package.json').version)")
           NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          # --ignore-scripts: package.json must never declare a `publish` script.
+          # npm runs scripts named after lifecycle hooks, so `npm publish` would
+          # re-enter the release tooling (and its unauthenticated `bun publish`).
+          # The tarball is already built by the steps above.
+          bunx npm@latest publish --access public --ignore-scripts
 
-          PUBLISHED_VERSION=$(bunx npm view "$PACKAGE_NAME" version 2>/dev/null || echo "unpublished")
-
-          if [ "$LOCAL_VERSION" = "$PUBLISHED_VERSION" ] && [ "$NEW_VERSION" = "$PUBLISHED_VERSION" ]; then
-            echo "Version $NEW_VERSION already published — skipping."
-            exit 0
-          fi
-
-          if [ "$NEW_VERSION" = "$PUBLISHED_VERSION" ]; then
-            echo "New version $NEW_VERSION already published — skipping."
-            exit 0
-          fi
-
-          echo "Publishing $PACKAGE_NAME@$NEW_VERSION (registry has $PUBLISHED_VERSION)..."
-
-          bunx npm@latest publish --access public
-
-          git tag "v$NEW_VERSION"
-          git push origin "v$NEW_VERSION"
+          git tag "v${NEW_VERSION}"
+          git push origin "v${NEW_VERSION}"
