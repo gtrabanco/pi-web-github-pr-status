@@ -24,6 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The workflow pushes the release bump commit back to the branch, so
+          # it needs the full history (a shallow clone cannot push reliably).
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@v2
 
