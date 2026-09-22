@@ -371,8 +371,9 @@ export function createPanelContribution(
     order: 30,
     routeAliases: ["pull-request", "pr"],
     visible: (context) => {
-      const metadata = context.workspace.provider?.metadata;
-      if (metadata?.isGitRepo === false) return false;
+      // Workspace must have a provider (v2 API). Non-git workspaces are
+      // filtered by the status check below (status.git === false).
+      if (context.workspace.provider === undefined) return false;
       const status = statusCache.get(context)?.status;
       if (status !== undefined && status.git === false && status.cold !== true) return false;
       return true;

@@ -12,7 +12,7 @@ import { createPanelContribution, PrUiController } from "./panel.ts";
  * guarded one-click merge and close without opening GitHub.
  */
 const plugin: PiWebPlugin = {
-  apiVersion: 2,
+  apiVersion: 4,
   name: "GitHub PR Status",
   activate: ({ runtimePluginId, html, svg }) => {
     const controller = new PrUiController();
