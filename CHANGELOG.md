@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The project follows [st
 - Fixed Pull Request panel freeze: the host passes a **brand-new context object** on every render, and the activity element was treating object identity as a disconnect/reconnect. That made `connect()` → `requestRender()` → fresh context → swap → `connect()` loop forever, freezing pi-web whenever the tab was opened (closing it stopped the loop). The context swap now keys on the **workspace identity** (machine + project + workspace) instead of the object reference, so same-workspace re-renders no longer re-trigger a render.
 - Fixed CI publishing: a `package.json` script named `publish` is an npm **lifecycle hook**, so `npm publish` re-ran the whole release tooling recursively (`bun run scripts/release.ts --publish` → `bun publish`, which has no OIDC support) and failed *after* the package had already been uploaded with provenance. The script is renamed to `release` and the workflow publishes with `--ignore-scripts`.
 
+## 0.1.7 — 2026-10-14 (Patch release)
+
+- See commit history for details.
+
 ## 0.1.2 — 2026-09-09 (Patch release)
 
 - See commit history for details.
