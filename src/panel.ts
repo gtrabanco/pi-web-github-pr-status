@@ -369,7 +369,6 @@ export function createPanelContribution(
       </svg>
     `,
     order: 30,
-    routeAliases: ["pull-request", "pr"],
     visible: (context) => {
       // Workspace must have a provider (v2 API). Non-git workspaces are
       // filtered by the status check below (status.git === false).
